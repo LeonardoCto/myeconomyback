@@ -278,10 +278,27 @@ app.delete('/expense/delete/:id', validateToken, async (req, res) => {
     }
 });
 
-// ------ENDPOINTS LIMITE------
+// ------ENDPOINTS LIMITES------
 
-app.post('/limit/create', validateToken, async(req, res) => {
-    const { reference_month, limit_amount } = req.body;
+app.get('/limits', validateToken, async (req, res) => {
+    const userId = req.user.id;
+
+    try {
+        const client = await pool.connect();
+        const limits = await client.query(
+            'SELECT * FROM user_limit WHERE user_id = $1',
+            [userId]
+        );
+        client.release();
+        res.status(200).json({ limits: limits.rows });
+    } catch (error) {
+        console.error('Erro ao listar limites', error);
+        res.status(500).send('Erro ao listar limites!');
+    }
+});
+
+app.post('/limit/create', validateToken, async (req, res) => {
+    const { amount, reference_month, category_id } = req.body;
     const userId = req.user.id;
 
     const index1 = reference_month.charAt(3);
@@ -289,164 +306,44 @@ app.post('/limit/create', validateToken, async(req, res) => {
     const limitMonth = index1 + index2;
 
     if (limitMonth < month) {
-        res.status(400).send('Não é possível inserir um limite em um mês anterior ao atual!')
+        res.status(400).send('Não é possível inserir um limite em um mês anterior ao atual!');
     } else {
         try {
             const client = await pool.connect();
             await client.query('SET datestyle = "DMY"');
-            const limitExists = await client.query(
-                'SELECT * FROM user_limit WHERE user_id = $1 AND EXTRACT(MONTH FROM reference_month) = $2',
-                [userId, limitMonth]
+            const newLimit = await client.query(
+                'INSERT INTO user_limit (amount, reference_month, user_id, category_id) VALUES ($1, $2, $3, $4) RETURNING *',
+                [amount, reference_month, userId, category_id]
             );
-            if (limitExists.rows.length > 0) {
-                client.release();
-                res.status(400).send('Já existe um limite inserido nesse mês')
-            } else {
-                await client.query('SET datestyle = "DMY"');
-                const newLimit = await client.query(
-                    'INSERT INTO user_limit (user_id, reference_month, limit_amount) VALUES ($1, $2, $3) RETURNING *',
-                    [userId, reference_month, limit_amount]
-                );
-                client.release();
-                res.status(200).json({ message: 'Limite cadastrado com sucesso!', limit: newLimit.rows[0] })
-            }
+            client.release();
+            res.status(201).json({ message: 'Limite cadastrado com sucesso!', limit: newLimit.rows[0] });
         } catch (error) {
-            res.status(500).send('Erro ao inserir um limite!');
-            console.error('Erro ao inserir limite', error);
+            console.error('Erro ao cadastrar limite: ', error);
+            res.status(500).send('Erro ao cadastrar limite!');
         }
     }
 });
 
-app.get('/limit', validateToken, async (req, res) => {
-    const userId = req.user.id;
-
-    try { 
-        const client = await pool.connect();
-        const read = await client.query(
-            'SELECT * FROM user_limit WHERE user_id = $1',
-            [userId]
-        );
-        client.release();
-        res.status(200).json({ limits: read.rows })
-    } catch (error) {
-        res.status(500).send('Erro ao buscar limites');
-        console.error('Erro ao buscar limites', error);
-    }
-});
-
-app.get('/limit/today', validateToken, async (req, res) => {
-    const userId = req.user.id;
-
-    try { 
-        const client = await pool.connect();
-        const read = await client.query(
-            'SELECT * FROM user_limit WHERE user_id = $1 AND EXTRACT(MONTH FROM reference_month) = $2',
-            [userId, month]
-        );
-        client.release();
-        res.status(200).json({ limits: read.rows })
-    } catch (error) {
-        res.status(500).send('Erro ao buscar limites');
-        console.error('Erro ao buscar limites', error);
-    }
-});
-
-app.get('/limit/mes/:month', validateToken, async (req, res) => {
-    const userId = req.user.id;
-    const { month } = req.params;
-
-    // Validar o formato do mês
-    if (!/^\d{2}-\d{2}-\d{4}$/.test(month)) {
-        return res.status(400).send('Formato do mês inválido. Use o formato DD-MM-YYYY.');
-    }
-
-    // Extrair o mês e ano do parâmetro
-    const [day, monthPart, year] = month.split('-');
-    const formattedMonth = `${year}-${monthPart}`;
+app.delete('/limit/delete/:id', validateToken, async (req, res) => {
+    const limitId = req.params.id;
 
     try {
-        const client = await pool.connect();
-        const read = await client.query(
-            `SELECT * FROM user_limit WHERE user_id = $1 AND TO_CHAR(reference_month, 'YYYY-MM') = $2`,
-            [userId, formattedMonth]
-        );
-        client.release();
-        if (read.rows.length > 0) {
-            res.status(200).json({ limits: read.rows });
+        const isLimitInPastMonth = await checkMonthLimit(limitId);
+
+        if (isLimitInPastMonth) {
+            res.status(400).send('Não é possível excluir um limite de um mês anterior ao atual!');
         } else {
-            res.status(404).send('Nenhum limite encontrado para o mês especificado.');
-        }
-    } catch (error) {
-        res.status(500).send('Erro ao buscar limites');
-        console.error('Erro ao buscar limites', error);
-    }
-});
-
-
-
-app.put('/limit/update', validateToken, async (req, res) => {
-    const { id, limit_amount } = req.body;
-    const isOlderMonth = await checkMonthLimit(id);
-
-    if (isOlderMonth) {
-        res.status(400).send('Não é possível atualizar um limite antigo!');
-    } else {
-        try {
             const client = await pool.connect();
-            const limitExists = await client.query(
-                'SELECT * FROM user_limit WHERE id = $1',
-                [id]
-            );
-            if (limitExists.rows.length > 0) {
-                if (limit_amount == null) {
-                    res.status(400).send('Preencha o campo de limite para pode atualizar!');
-                } else {
-                    await client.query(
-                        'UPDATE user_limit SET limit_amount = $1 WHERE id = $2',
-                        [limit_amount, id]
-                    );
-                    client.release();
-                    res.status(200).send('Limite atualizado com sucesso!');
-                }
-            } else {
-                client.release();
-                res.status(400).send('Esse limite não existe!');
-            }
-        } catch (error) {
-            res.status(500).send('Erro ao atualizar limite');
-            console.error('Erro ao atualizar limite', error);
+            const deleteLimit = await client.query('DELETE FROM user_limit WHERE id = $1', [limitId]);
+            client.release();
+            res.status(200).json({ message: 'Limite excluído com sucesso!' });
         }
-    }
-});
-
-app.delete("/limit/delete", validateToken, async (req, res) => {
-  const { id } = req.body;
-  const isOlderMonth = await checkMonthLimit(id);
-
-  if (isOlderMonth) {
-    res.status(400).send("Não é possível excluir um limite antigo!");
-  } else {
-    try {
-      const client = await pool.connect();
-      const limitExists = await client.query(
-        "SELECT * FROM user_limit WHERE id = $1",
-        [id]
-      );
-      if (limitExists.rows.length > 0) {
-        await client.query("DELETE FROM user_limit WHERE id = $1", [id]);
-        client.release();
-        res.status(200).send("Limite excluído com sucesso!");
-      } else {
-        client.release();
-        res.status(400).send("Esse limite não existe!");
-      }
     } catch (error) {
-      console.error("Erro ao excluir limite", error);
-      res.status(500).send("Erro ao excluir limite!");
+        console.error('Erro ao excluir limite: ', error);
+        res.status(500).send('Erro ao excluir limite!');
     }
-  }
 });
 
 app.listen(port, () => {
-    console.log(`Servidor inicializado em: http://localhost:${port}`);
+    console.log(`Servidor rodando na porta ${port}`);
 });
